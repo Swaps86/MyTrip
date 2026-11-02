@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- white map pin -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M54,26 C43,26 35,34 35,45 C35,60 54,82 54,82 C54,82 73,60 73,45 C73,34 65,26 54,26 Z" />
+    <!-- teal rupee sign -->
+    <path android:strokeColor="#0F6B5C" android:strokeWidth="2.6" android:strokeLineCap="round"
+        android:pathData="M46,37 L62,37" />
+    <path android:strokeColor="#0F6B5C" android:strokeWidth="2.6" android:strokeLineCap="round"
+        android:pathData="M46,43 L62,43" />
+    <path android:strokeColor="#0F6B5C" android:strokeWidth="2.6" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M48,37 L52,37 C60,37 60,49 52,49 L48,49 L58,60" />
+</vector>
