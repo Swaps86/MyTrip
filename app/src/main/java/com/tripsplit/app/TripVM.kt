@@ -19,6 +19,7 @@ sealed class Screen {
     object Join : Screen()
     data class Invite(val id: String) : Screen()
     data class Walkie(val id: String) : Screen()
+    data class Chat(val id: String) : Screen()
 }
 
 class TripVM(app: Application) : AndroidViewModel(app) {

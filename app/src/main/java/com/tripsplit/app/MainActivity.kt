@@ -32,6 +32,7 @@ fun App(vm: TripVM = viewModel()) {
             is Screen.Toll -> Screen.Detail(s.id)
             is Screen.Invite -> Screen.Detail(s.id)
             is Screen.Walkie -> Screen.Detail(s.id)
+            is Screen.Chat -> Screen.Detail(s.id)
             else -> Screen.Home
         }
     }
@@ -41,7 +42,8 @@ fun App(vm: TripVM = viewModel()) {
         Screen.Backup -> BackupScreen(vm)
         Screen.Join -> JoinScreen(vm)
         is Screen.Invite -> vm.trips.find { it.id == s.id }?.let { InviteScreen(it, vm) } ?: HomeScreen(vm)
-        is Screen.Walkie -> vm.trips.find { it.id == s.id }?.let { WalkieScreen(it, vm) } ?: HomeScreen(vm)
+        is Screen.Walkie -> vm.trips.find { it.id == s.id }?.let { HubScreen(it, vm, 1) } ?: HomeScreen(vm)
+        is Screen.Chat -> vm.trips.find { it.id == s.id }?.let { HubScreen(it, vm, 0) } ?: HomeScreen(vm)
         is Screen.Detail -> vm.trips.find { it.id == s.id }?.let { DetailScreen(it, vm) } ?: HomeScreen(vm)
         is Screen.ExpenseView -> {
             val t = vm.trips.find { it.id == s.id }

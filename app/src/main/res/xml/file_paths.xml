@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="reports" path="reports/" />
+    <files-path name="chat_in" path="chat_in/" />
+    <files-path name="chat_out" path="chat_out/" />
 </paths>
