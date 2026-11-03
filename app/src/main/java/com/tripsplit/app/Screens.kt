@@ -2,6 +2,11 @@ package com.tripsplit.app
 
 import android.Manifest
 import android.content.ClipData
+import android.os.Build
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontStyle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import android.graphics.BitmapFactory
 import android.media.ThumbnailUtils
 import android.net.Uri
@@ -869,6 +874,7 @@ fun InviteScreen(trip: Trip, vm: TripVM) {
                     Text("TRIP KEY", color = Muted, fontSize = 13.sp)
                     Text(trip.key.ifBlank { "..." }, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0B4F44))
                     Text("Only phones with this key can join", color = Muted, fontSize = 13.sp)
+                    Text("Works only from ${fmtDate(trip.start)} to ${fmtDate(trip.end)}", color = Color(0xFF0B4F44), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
             WhiteCard {
@@ -985,37 +991,142 @@ private fun decodeThumb(path: String): ImageBitmap? = try {
 @Composable
 private fun HubBody(trip: Trip, vm: TripVM, startTab: Int, modifier: Modifier) {
     val ctx = LocalContext.current
-    val appCtx = ctx.applicationContext
     val view = LocalView.current
-    val deviceId = remember { devId(appCtx) }
-    val net = remember(trip.id, trip.key, trip.me) { TripNet(appCtx, trip.id, trip.key, trip.me, deviceId) }
-    DisposableEffect(net) { net.start(); onDispose { net.stop() } }
-    DisposableEffect(view) { view.keepScreenOn = true; onDispose { view.keepScreenOn = false } }
-    var tab by remember { mutableIntStateOf(startTab) }
-    var members by remember { mutableStateOf(false) }
+    val owner = LocalLifecycleOwner.current
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(1000); now = System.currentTimeMillis() } }
-    LaunchedEffect(net.note) { net.note?.let { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show(); net.note = null } }
-    BackHandler(members) { members = false }
-    fun online(n: String) = n == trip.me || (net.seen[n] ?: 0L) > now - 6000
-    fun joinedN(n: String) = n == trip.me || net.joined.containsKey(n)
-    val onlineCount = trip.travelers.count { online(it) }
-    val joinedCount = trip.travelers.count { joinedN(it) }
+    val window = remember(trip.start, trip.end) { tripWindow(trip.start, trip.end) }
+    val active = now in window
+    // read-only copy (not connected) so old messages stay readable outside the trip dates
+    val readOnly = remember(trip.id, trip.key, trip.me) {
+        TripNet(ctx.applicationContext, trip.id, trip.key, trip.me, devId(ctx.applicationContext), window)
+    }
+    val live = NetHolder.net?.takeIf { it.tripId == trip.id && it.me == trip.me }
+    val net: TripNet? = if (active) live else readOnly
+    LaunchedEffect(trip.id, trip.key, trip.me, active) {
+        val cur = NetHolder.net
+        if (active && (cur == null || cur.tripId != trip.id || cur.me != trip.me)) ListenService.start(ctx, trip)
+    }
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    DisposableEffect(view) { view.keepScreenOn = true; onDispose { view.keepScreenOn = false } }
+    DisposableEffect(owner) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_RESUME) NetHolder.uiVisible = true
+            else if (e == Lifecycle.Event.ON_PAUSE) NetHolder.uiVisible = false
+        }
+        owner.lifecycle.addObserver(obs)
+        NetHolder.uiVisible = owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        onDispose { owner.lifecycle.removeObserver(obs); NetHolder.uiVisible = false }
+    }
+    var tab by remember { mutableIntStateOf(if (active) startTab else 0) }
+    var panel by remember { mutableIntStateOf(0) }   // 0 chat or walkie, 1 members, 2 connection
+    LaunchedEffect(net?.note) {
+        net?.let { n -> n.note?.let { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show(); n.note = null } }
+    }
+    BackHandler(panel != 0) { panel = 0 }
 
     Column(modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Header(trip.name, "$joinedCount of ${trip.travelers.size} joined · $onlineCount online",
-            onBack = { if (members) members = false else vm.screen = Screen.Detail(trip.id) }) {
-            TextButton(onClick = { members = !members }) { Text(if (members) "Chat" else "Members") }
+        if (net == null) {
+            Header(trip.name, "Connecting…", onBack = { vm.screen = Screen.Detail(trip.id) })
+            Text("Starting the Wi-Fi connection for this trip…", color = Muted)
+            return@Column
         }
-        if (members) {
+        fun online(n: String) = active && (n == trip.me || (net.seen[n] ?: 0L) > now - 6000)
+        fun joinedN(n: String) = n == trip.me || net.joined.containsKey(n)
+        val onlineCount = trip.travelers.count { online(it) }
+        val joinedCount = trip.travelers.count { joinedN(it) }
+        Header(trip.name, if (active) "$joinedCount of ${trip.travelers.size} joined · $onlineCount online · " +
+            (if (net.linkUp) "Wi-Fi connected" else "No Wi-Fi link")
+            else "Chat is closed · old messages stay readable",
+            onBack = { if (panel != 0) panel = 0 else vm.screen = Screen.Detail(trip.id) }) {
+            Row {
+                if (active) TextButton(onClick = { panel = if (panel == 2) 0 else 2 }) { Text(if (panel == 2) "Chat" else "Status") }
+                TextButton(onClick = { panel = if (panel == 1) 0 else 1 }) { Text(if (panel == 1) "Chat" else "Members") }
+            }
+        }
+        if (!active) Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF4E5))) {
+            Column(Modifier.padding(12.dp)) {
+                Text("Trip chat is closed", fontWeight = FontWeight.Bold)
+                Text("The trip key works only from ${fmtDate(trip.start)} to ${fmtDate(trip.end)}. " +
+                    "New messages, files and walkie-talkie calls are blocked outside these dates. You can still read old messages.",
+                    color = Muted, fontSize = 13.sp)
+            }
+        }
+        if (panel == 1) {
             MembersPanel(trip, net, ::online, ::joinedN, now)
+        } else if (panel == 2 && active) {
+            ConnectionPanel(trip, net, ::online, now, ctx)
         } else {
-            TabRow(selectedTabIndex = tab, containerColor = Bg) {
+            if (active) TabRow(selectedTabIndex = tab, containerColor = Bg) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Chat") })
                 Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Walkie-talkie") })
             }
-            if (tab == 0) ChatPane(net, trip, ctx) else WalkiePane(net, trip, onlineCount, now)
+            if (tab == 0 || !active) ChatPane(net, trip, ctx, active) else WalkiePane(net, trip, onlineCount, now)
         }
+    }
+}
+
+@Composable
+private fun ColumnScope.ConnectionPanel(trip: Trip, net: TripNet, online: (String) -> Boolean, now: Long, ctx: Context) {
+    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        WhiteCard {
+            Text(if (net.linkUp) "Connected · Wi-Fi link found" else "No Wi-Fi link found",
+                fontSize = 18.sp, fontWeight = FontWeight.Bold, color = if (net.linkUp) Color(0xFF1B7A4B) else Owe)
+            Text(if (net.linkUp) "Messages and calls go straight between the phones on this Wi-Fi or hotspot."
+                 else "Connect to the same Wi-Fi, or switch on a hotspot on one phone and connect the others to it.",
+                color = Muted, fontSize = 13.sp)
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Card(Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("Wi-Fi", fontWeight = FontWeight.Bold)
+                    Text(if (net.linkUp) "Connected" else "Not connected", color = if (net.linkUp) Color(0xFF1B7A4B) else Owe, fontWeight = FontWeight.SemiBold)
+                    Text("${trip.travelers.count { online(it) && it != trip.me }} people nearby", color = Muted, fontSize = 13.sp)
+                }
+            }
+            Card(Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("Internet", fontWeight = FontWeight.Bold)
+                    Text(if (net.internetOk) "Available" else "Not available", color = if (net.internetOk) Color(0xFF1B7A4B) else Muted, fontWeight = FontWeight.SemiBold)
+                    Text("Not used yet. Internet mode is the next step.", color = Muted, fontSize = 13.sp)
+                }
+            }
+        }
+        Text("PEOPLE (${trip.travelers.size})", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        WhiteCard {
+            trip.travelers.forEach { n ->
+                val on = online(n)
+                val last = net.joined[n]
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text(n + if (n == trip.me) " (You)" else "", fontWeight = FontWeight.SemiBold)
+                        Text(if (on) "Online now" else if (last != null) "Last seen ${hm(last)}" else "Not seen yet", color = Muted, fontSize = 13.sp)
+                    }
+                    Text(if (n == trip.me) "This phone" else if (on) "Wi-Fi direct" else "Offline", fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                        color = if (on) Color(0xFF0B4F44) else Muted)
+                }
+            }
+        }
+        Button(modifier = Modifier.fillMaxWidth().height(48.dp), onClick = {
+            net.refresh(); Toast.makeText(ctx, "Looking for people on this Wi-Fi…", Toast.LENGTH_SHORT).show()
+        }) { Text("Test connection") }
+        OutlinedButton(modifier = Modifier.fillMaxWidth().height(48.dp),
+            onClick = { ListenService.stop(ctx); Toast.makeText(ctx, "Stopped listening", Toast.LENGTH_SHORT).show() }) {
+            Text("Stop listening in background")
+        }
+        WhiteCard {
+            Text("If people do not show up", fontWeight = FontWeight.Bold)
+            Text("• Every phone must be on the same Wi-Fi or hotspot.", color = Muted, fontSize = 13.sp)
+            Text("• Hotel and public Wi-Fi often block phone-to-phone traffic. Use a phone hotspot instead.", color = Muted, fontSize = 13.sp)
+            Text("• Turn off battery saver for TripSplit and allow notifications.", color = Muted, fontSize = 13.sp)
+            Text("• Everyone needs the same trip key. Reset it and send a new invite if unsure.", color = Muted, fontSize = 13.sp)
+        }
+        Spacer(Modifier.height(8.dp))
     }
 }
 
@@ -1057,7 +1168,7 @@ private fun ColumnScope.MembersPanel(trip: Trip, net: TripNet, online: (String) 
 }
 
 @Composable
-private fun ColumnScope.ChatPane(net: TripNet, trip: Trip, ctx: Context) {
+private fun ColumnScope.ChatPane(net: TripNet, trip: Trip, ctx: Context, canSend: Boolean = true) {
     val listState = rememberLazyListState()
     var text by remember { mutableStateOf("") }
     var attach by remember { mutableStateOf(false) }
@@ -1086,9 +1197,9 @@ private fun ColumnScope.ChatPane(net: TripNet, trip: Trip, ctx: Context) {
     LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         item { Text("Messages go over Wi-Fi to everyone on this trip. You get them while this screen is open.",
             color = Muted, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) }
-        items(net.messages, key = { it.id }) { m -> MsgBubble(m, m.from == trip.me, net, ctx) }
+        items(net.messages, key = { it.id }) { m -> MsgBubble(m, m.from == trip.me, net, trip, ctx) }
     }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    if (canSend) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { attach = true }) { Text("＋ Attach") }
         OutlinedTextField(text, { if (it.length <= 300) text = it }, placeholder = { Text("Type a message") },
             modifier = Modifier.weight(1f), maxLines = 3)
@@ -1099,14 +1210,22 @@ private fun ColumnScope.ChatPane(net: TripNet, trip: Trip, ctx: Context) {
 }
 
 @Composable
-private fun MsgBubble(m: ChatMsg, mine: Boolean, net: TripNet, ctx: Context) {
+private fun MsgBubble(m: ChatMsg, mine: Boolean, net: TripNet, trip: Trip, ctx: Context) {
     val path = net.localFiles[m.fid]?.takeIf { File(it).exists() }
     val prog = net.progress[m.fid]
+    var menu by remember { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf(false) }
+    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete for everyone?") },
+        text = { Text("This removes the message from every phone in the trip, also from people who are offline when they reconnect.") },
+        confirmButton = { TextButton(onClick = { net.deleteForEveryone(m); confirm = false }) { Text("Delete for everyone") } },
+        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
-        Surface(color = if (mine) Color(0xFFD3EEDC) else Color.White, shape = RoundedCornerShape(14.dp)) {
+        Surface(color = if (m.kind == "deleted") Color(0xFFEDEFEE) else if (mine) Color(0xFFD3EEDC) else Color.White,
+            shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(10.dp).widthIn(max = 270.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (!mine) Text(m.from, color = Color(0xFF0B4F44), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                if (!mine && m.kind != "deleted") Text(m.from, color = Color(0xFF0B4F44), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 when (m.kind) {
+                    "deleted" -> Text("This message was deleted", color = Muted, fontStyle = FontStyle.Italic)
                     "text" -> Text(m.text)
                     "image", "video" -> {
                         val bmp by produceState<ImageBitmap?>(null, path, m.kind) {
@@ -1120,7 +1239,10 @@ private fun MsgBubble(m: ChatMsg, mine: Boolean, net: TripNet, ctx: Context) {
                             contentAlignment = Alignment.Center) {
                             bmp?.let { Image(it, m.fname, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
                             if (path != null && m.kind == "video") Text("▶", fontSize = 40.sp, color = Color.White)
-                            if (path == null && prog == null) Text("Tap to download\n${fmtSize(m.size)}", color = Muted, fontSize = 13.sp)
+                            if (path == null && prog == null) {
+                                if (m.fid in net.failed) Text("Failed · tap to retry", color = Owe, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                else Text("Tap to download\n${fmtSize(m.size)}", color = Muted, fontSize = 13.sp)
+                            }
                         }
                     }
                     else -> Row(Modifier.fillMaxWidth().clickable { if (path != null) openLocal(ctx, path, m.mime) else net.download(m) },
@@ -1128,7 +1250,9 @@ private fun MsgBubble(m: ChatMsg, mine: Boolean, net: TripNet, ctx: Context) {
                         Text("FILE", fontWeight = FontWeight.Bold, color = Owe, fontSize = 12.sp)
                         Column(Modifier.weight(1f)) {
                             Text(m.fname, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 2)
-                            Text(if (path != null) "${fmtSize(m.size)} · tap to open" else "${fmtSize(m.size)} · tap to download", color = Muted, fontSize = 12.sp)
+                            Text(if (path != null) "${fmtSize(m.size)} · tap to open"
+                                 else if (m.fid in net.failed) "Failed · tap to retry"
+                                 else "${fmtSize(m.size)} · tap to download", color = if (m.fid in net.failed) Owe else Muted, fontSize = 12.sp)
                         }
                     }
                 }
@@ -1136,8 +1260,25 @@ private fun MsgBubble(m: ChatMsg, mine: Boolean, net: TripNet, ctx: Context) {
                     LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth().height(6.dp))
                     Text(if (mine) "Preparing…" else "Downloading ${(prog * 100).toInt()}%", color = Muted, fontSize = 12.sp)
                 }
-                if (m.kind != "text" && m.kind != "file" && path != null) Text("${m.fname} · ${fmtSize(m.size)}", color = Muted, fontSize = 11.sp, maxLines = 1)
-                Text(hm(m.ts), color = Muted, fontSize = 11.sp, modifier = Modifier.align(Alignment.End))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    val k = net.acks[m.id]?.size ?: 0
+                    val total = (trip.travelers.size - 1).coerceAtLeast(1)
+                    Text(if (mine && m.kind != "deleted") {
+                            if (k > 0) "✓✓ Delivered to ${minOf(k, total)} of $total"
+                            else if (!net.linkUp) "⏳ Waiting for connection" else "✓ Sent"
+                         } else "", color = Muted, fontSize = 11.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(hm(m.ts), color = Muted, fontSize = 11.sp)
+                        Box {
+                            Text("  ⋮", color = Muted, fontSize = 16.sp, modifier = Modifier.clickable { menu = true })
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                DropdownMenuItem(text = { Text("Delete for me") }, onClick = { menu = false; net.deleteForMe(m.id) })
+                                if (net.canDeleteForEveryone(m)) DropdownMenuItem(text = { Text("Delete for everyone") },
+                                    onClick = { menu = false; confirm = true })
+                            }
+                        }
+                    }
+                }
             }
         }
     }
