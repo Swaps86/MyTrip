@@ -15,11 +15,9 @@ sealed class Screen {
     data class ExpenseView(val id: String, val eid: String) : Screen()
     data class Form(val id: String, val eid: String?) : Screen()
     data class Toll(val id: String) : Screen()
+    data class Share(val id: String) : Screen()
     object Backup : Screen()
     object Join : Screen()
-    data class Invite(val id: String) : Screen()
-    data class Walkie(val id: String) : Screen()
-    data class Chat(val id: String) : Screen()
 }
 
 class TripVM(app: Application) : AndroidViewModel(app) {
@@ -27,11 +25,17 @@ class TripVM(app: Application) : AndroidViewModel(app) {
     var screen by mutableStateOf<Screen>(Screen.Home)
     var trips by mutableStateOf(load()); private set
     var customCats by mutableStateOf(loadCats()); private set
+    var autoSync by mutableStateOf(prefs.getBoolean("autosync", true)); private set
+
+    /** Finds other phones with the same trip key and merges expenses automatically. */
+    val sync = SyncEngine(app, devId(app), { trips }, { tid, r -> applyMerged(tid, r) })
 
     val allCats: List<String> get() = CATEGORIES + customCats
 
     var lastBackup by mutableStateOf(prefs.getLong("last_backup", 0L)); private set
     var remind by mutableStateOf(prefs.getBoolean("remind", true)); private set
+
+    fun updateAutoSync(on: Boolean) { autoSync = on; prefs.edit().putBoolean("autosync", on).apply() }
 
     fun backupText(): String = JSONObject().put("app", "TripSplit").put("format", 1)
         .put("saved", System.currentTimeMillis())
@@ -50,12 +54,7 @@ class TripVM(app: Application) : AndroidViewModel(app) {
         val merged = trips.toMutableList()
         for (bt in b.trips) {
             val i = merged.indexOfFirst { it.id == bt.id }
-            if (i < 0) merged.add(bt) else {
-                val cur = merged[i]
-                val ids = cur.expenses.map { it.id }.toSet()
-                merged[i] = cur.copy(travelers = (cur.travelers + bt.travelers).distinct(),
-                    expenses = cur.expenses + bt.expenses.filter { it.id !in ids })
-            }
+            if (i < 0) merged.add(bt) else merged[i] = mergeTrips(merged[i], bt)
         }
         save(merged); setCats((customCats + b.cats).distinct())
     }
@@ -81,24 +80,38 @@ class TripVM(app: Application) : AndroidViewModel(app) {
         val prefix = name.filter { it.isLetter() }.take(3).uppercase().padEnd(3, 'X')
         return "$prefix-${part()}-${part()}"
     }
+
     fun ensureKey(tid: String) {
         val t = trips.find { it.id == tid } ?: return
         if (t.key.isBlank()) save(trips.map { if (it.id == tid) it.copy(key = newKey(it.name)) else it })
     }
     fun resetKey(tid: String) = save(trips.map { if (it.id == tid) it.copy(key = newKey(it.name)) else it })
     fun setMe(tid: String, name: String) = save(trips.map { if (it.id == tid) it.copy(me = name) else it })
-    /** Adds an invited trip to this phone (or links an existing one) and records who I am. */
+
+    /** Adds a trip received with a key (or links the one already here), keeping every expense. */
     fun joinTrip(t: Trip, me: String) {
         if (trips.any { it.id == t.id }) save(trips.map {
-            if (it.id == t.id) it.copy(key = t.key, me = me, travelers = (it.travelers + t.travelers).distinct()) else it })
-        else save(listOf(t.copy(me = me, expenses = emptyList())) + trips)
+            if (it.id == t.id) mergeTrips(it, t).copy(key = t.key, me = me) else it })
+        else save(listOf(t.copy(me = me)) + trips)
     }
 
-    fun addTrip(t: Trip) = save(listOf(t) + trips)
+    /** Called by auto sync (on the main thread). Returns the expenses that others added. */
+    fun applyMerged(tid: String, remote: Trip): List<Expense> {
+        val cur = trips.find { it.id == tid } ?: return emptyList()
+        val merged = mergeTrips(cur, remote)
+        val had = cur.expenses.map { it.id }.toSet()
+        val fresh = merged.expenses.filter { it.id !in had && it.addedBy != cur.me }
+        if (merged != cur) save(trips.map { if (it.id == tid) merged else it })
+        return fresh
+    }
+
+    fun addTrip(t: Trip) = save(listOf(t.copy(me = t.me.ifBlank { t.travelers.firstOrNull() ?: "" })) + trips)
     fun deleteTrip(id: String) { save(trips.filter { it.id != id }); screen = Screen.Home }
 
-    fun addTraveler(tid: String, name: String) =
+    fun addTraveler(tid: String, name: String) {
         save(trips.map { if (it.id == tid && name !in it.travelers) it.copy(travelers = it.travelers + name) else it })
+        sync.syncNow(tid)
+    }
 
     fun addCategory(name: String) {
         if (name.isBlank() || allCats.any { it.equals(name, true) }) return
@@ -106,14 +119,23 @@ class TripVM(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString("cats", JSONArray(customCats).toString()).apply()
     }
 
-    /** Adds a new expense or replaces the one with the same id. */
-    fun saveExpense(tid: String, e: Expense) = save(trips.map { t ->
-        if (t.id != tid) t else t.copy(
-            expenses = if (t.expenses.any { it.id == e.id }) t.expenses.map { if (it.id == e.id) e else it }
-            else listOf(e) + t.expenses
-        )
-    })
+    /** Adds a new expense or replaces the one with the same id, remembering who added or edited it. */
+    fun saveExpense(tid: String, e0: Expense) {
+        val t = trips.find { it.id == tid } ?: return
+        val now = System.currentTimeMillis()
+        val me = t.me.ifBlank { t.travelers.firstOrNull() ?: "" }
+        val old = t.expenses.find { it.id == e0.id }
+        val e = if (old == null) e0.copy(addedBy = e0.addedBy.ifBlank { me }, addedAt = if (e0.addedAt == 0L) now else e0.addedAt, updatedAt = now)
+                else e0.copy(addedBy = old.addedBy.ifBlank { me }, addedAt = old.addedAt, updatedAt = now, editedBy = me)
+        save(trips.map { x ->
+            if (x.id != tid) x else x.copy(expenses = if (old != null) x.expenses.map { if (it.id == e.id) e else it } else listOf(e) + x.expenses)
+        })
+        sync.syncNow(tid)
+    }
 
-    fun deleteExpense(tid: String, eid: String) =
-        save(trips.map { if (it.id == tid) it.copy(expenses = it.expenses.filter { x -> x.id != eid }) else it })
+    fun deleteExpense(tid: String, eid: String) {
+        val now = System.currentTimeMillis()
+        save(trips.map { if (it.id == tid) it.copy(expenses = it.expenses.filter { x -> x.id != eid }, deleted = it.deleted + (eid to now)) else it })
+        sync.syncNow(tid)
+    }
 }

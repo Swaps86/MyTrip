@@ -342,20 +342,25 @@ fun DetailScreen(trip: Trip, vm: TripVM) {
                 }
             }
             item {
-                WhiteCard {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically) {
+                var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+                LaunchedEffect(Unit) { while (true) { delay(2000); now = System.currentTimeMillis() } }
+                val sy = vm.sync
+                val near = trip.travelers.count { it != trip.me && (sy.seen["${trip.id}|$it"] ?: 0L) > now - 8000 }
+                val last = sy.lastSync[trip.id]
+                val fresh = sy.incoming.lastOrNull { it.tripId == trip.id && now - it.at < 60_000 }
+                WhiteCard(Modifier.clickable { vm.ensureKey(trip.id); vm.screen = Screen.Share(trip.id) }) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Trip chat and walkie-talkie", fontWeight = FontWeight.Bold)
-                            Text("Messages, photos, videos, files and voice on Wi-Fi", color = Muted, fontSize = 13.sp)
+                            Text(if (trip.key.isBlank()) "Share expenses with your group"
+                                 else if (!vm.autoSync) "Auto sync is off"
+                                 else if (sy.linkUp) "Auto sync · Wi-Fi connected" else "Auto sync · waiting for Wi-Fi", fontWeight = FontWeight.Bold)
+                            Text(if (trip.key.isBlank()) "Tap to create the trip key and invite people"
+                                 else "$near people nearby · " + (last?.let { "last sync ${ago(it, now)}" } ?: "not synced yet"),
+                                color = Muted, fontSize = 13.sp)
                         }
+                        Text("›", fontSize = 22.sp, color = Muted)
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(modifier = Modifier.weight(1f), onClick = { vm.ensureKey(trip.id); vm.screen = Screen.Chat(trip.id) }) { Text("Chat") }
-                        OutlinedButton(modifier = Modifier.weight(1f), onClick = { vm.ensureKey(trip.id); vm.screen = Screen.Walkie(trip.id) }) { Text("Walkie-talkie") }
-                    }
-                    OutlinedButton(modifier = Modifier.fillMaxWidth(),
-                        onClick = { vm.ensureKey(trip.id); vm.screen = Screen.Invite(trip.id) }) { Text("Invite people") }
+                    if (fresh != null) Text("New from ${fresh.who}: ${fresh.text}", color = Green, fontWeight = FontWeight.SemiBold)
                 }
             }
             item {
@@ -401,7 +406,7 @@ fun DetailScreen(trip: Trip, vm: TripVM) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(e.category + refTag(e.ref), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                                Text("${e.paidBy} paid · ${fmtDate(e.date)}", color = Muted, fontSize = 13.sp)
+                                Text("${e.paidBy} paid · ${fmtDate(e.date)}" + (if (e.addedBy.isNotBlank()) " · Added by ${e.addedBy}" else ""), color = Muted, fontSize = 13.sp)
                                 if (e.location.isNotBlank()) Text(e.location, color = Muted, fontSize = 13.sp)
                                 if (e.note.isNotBlank()) Text(e.note, color = Muted, fontSize = 13.sp)
                             }
@@ -543,6 +548,17 @@ fun ExpenseScreen(trip: Trip, e: Expense, vm: TripVM) {
             WhiteCard {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Paid by", color = Muted); Text(e.paidBy, fontWeight = FontWeight.SemiBold)
+                }
+                if (e.addedBy.isNotBlank()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Added by", color = Muted); Text(e.addedBy, fontWeight = FontWeight.SemiBold, color = Color(0xFF0B4F44))
+                }
+                if (e.addedAt > 0) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Added on", color = Muted)
+                    Text(SimpleDateFormat("d MMM yyyy, h:mm a", Locale.ENGLISH).format(Date(e.addedAt)), fontWeight = FontWeight.SemiBold)
+                }
+                if (e.editedBy.isNotBlank()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Last edited by", color = Muted)
+                    Text("${e.editedBy} · ${SimpleDateFormat("h:mm a", Locale.ENGLISH).format(Date(e.updatedAt))}", fontWeight = FontWeight.SemiBold)
                 }
             }
             if (e.location.isNotBlank()) WhiteCard {
@@ -856,30 +872,41 @@ fun BackupScreen(vm: TripVM) {
     }
 }
 
-// ---------- 8. Invite, join and walkie-talkie ----------
+// ---------- 8. Share with a key, auto sync, join ----------
+private fun hm(ms: Long): String = SimpleDateFormat("h:mm a", Locale.ENGLISH).format(Date(ms))
+
+private fun ago(ms: Long, now: Long): String {
+    val d = (now - ms) / 1000
+    return when { d < 10 -> "just now"; d < 60 -> "${d}s ago"; d < 3600 -> "${d / 60} min ago"; else -> hm(ms) }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun InviteScreen(trip: Trip, vm: TripVM) {
+fun ShareScreen(trip: Trip, vm: TripVM) {
     val ctx = LocalContext.current
+    val sy = vm.sync
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { delay(1500); now = System.currentTimeMillis() } }
     var confirm by remember { mutableStateOf(false) }
     if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Reset trip key?") },
-        text = { Text("People who already joined will no longer connect. Send the new invite only to the people you want.") },
+        text = { Text("Phones that joined with the old key stop syncing. Send the new invite only to the people you want.") },
         confirmButton = { TextButton(onClick = { vm.resetKey(trip.id); confirm = false }) { Text("Reset") } },
         dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
     Scaffold(containerColor = Bg) { p ->
         Column(Modifier.padding(p).padding(horizontal = 16.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Header("Invite people", trip.name, onBack = { vm.screen = Screen.Detail(trip.id) })
+            Header("Share and auto sync", trip.name, onBack = { vm.screen = Screen.Detail(trip.id) })
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFEAF4F1))) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("TRIP KEY", color = Muted, fontSize = 13.sp)
                     Text(trip.key.ifBlank { "..." }, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0B4F44))
-                    Text("Only phones with this key can join", color = Muted, fontSize = 13.sp)
-                    Text("Works only from ${fmtDate(trip.start)} to ${fmtDate(trip.end)}", color = Color(0xFF0B4F44), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Anyone who enters this key joins the trip. Expenses merge by themselves.",
+                        color = Muted, fontSize = 13.sp)
                 }
             }
-            WhiteCard {
-                Text("People in this trip", fontWeight = FontWeight.Bold)
-                Text(trip.travelers.joinToString(" · "), color = Muted, fontSize = 13.sp)
+            Text("Who are you on this phone?", color = Muted, fontSize = 13.sp)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                trip.travelers.forEach { n -> FilterChip(selected = trip.me == n, onClick = { vm.setMe(trip.id, n) }, label = { Text(n) }) }
             }
             Button(modifier = Modifier.fillMaxWidth().height(52.dp), enabled = trip.key.isNotBlank(),
                 onClick = { shareToWhatsApp(ctx, makeInviteText(trip)) }) { Text("Send invite on WhatsApp") }
@@ -888,12 +915,52 @@ fun InviteScreen(trip: Trip, vm: TripVM) {
                 cm.setPrimaryClip(ClipData.newPlainText("TripSplit invite", makeInviteText(trip)))
                 Toast.makeText(ctx, "Invite copied", Toast.LENGTH_SHORT).show()
             }) { Text("Copy invite") }
-            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF4E5))) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("Send only to your group", fontWeight = FontWeight.Bold)
-                    Text("Anyone who gets the invite can join. Do not post it in a public group.", color = Muted, fontSize = 13.sp)
+            WhiteCard {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Auto sync", fontWeight = FontWeight.Bold)
+                        Text("Merge expenses by itself whenever phones with this key are on the same Wi-Fi", color = Muted, fontSize = 13.sp)
+                    }
+                    Switch(checked = vm.autoSync, onCheckedChange = { vm.updateAutoSync(it) })
                 }
             }
+            WhiteCard {
+                Text("Connections", fontWeight = FontWeight.Bold)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Wi-Fi / hotspot")
+                    Text(if (sy.linkUp) "Connected" else "Not connected", fontWeight = FontWeight.Bold,
+                        color = if (sy.linkUp) Color(0xFF1B7A4B) else Owe)
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Internet")
+                    Text("Not used yet", color = Muted)
+                }
+                if (sy.error != null) Text(sy.error ?: "", color = Owe, fontSize = 13.sp)
+                Text("Both phones must be on the same Wi-Fi, or one phone's hotspot, at the same time.", color = Muted, fontSize = 13.sp)
+            }
+            Button(modifier = Modifier.fillMaxWidth().height(48.dp), onClick = {
+                sy.syncNow(trip.id); Toast.makeText(ctx, "Syncing with nearby phones…", Toast.LENGTH_SHORT).show()
+            }) { Text(if (sy.syncing) "Syncing…" else "Sync now") }
+            Text("PEOPLE", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            WhiteCard {
+                trip.travelers.forEach { n ->
+                    val k = "${trip.id}|$n"
+                    val on = n != trip.me && (sy.seen[k] ?: 0L) > now - 8000
+                    val last = sy.syncedAt[k]
+                    val count = trip.expenses.count { it.addedBy == n }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column {
+                            Text(n + if (n == trip.me) " (You)" else "", fontWeight = FontWeight.SemiBold)
+                            Text(if (n == trip.me) "$count expenses added"
+                                 else if (on) "Online · " + (last?.let { "synced ${ago(it, now)}" } ?: "syncing…")
+                                 else if (last != null) "Last synced ${ago(last, now)}" else "Not connected yet",
+                                color = Muted, fontSize = 13.sp)
+                        }
+                        Box(Modifier.size(10.dp).clip(CircleShape).background(if (on || n == trip.me) Color(0xFF1B9E5A) else Color(0xFFB7BFBA)))
+                    }
+                }
+            }
+            TextButton(onClick = { vm.screen = Screen.Backup }) { Text("Import from a backup file instead") }
             TextButton(onClick = { confirm = true }) { Text("Reset trip key", color = Owe) }
             Spacer(Modifier.height(16.dp))
         }
@@ -905,28 +972,36 @@ fun JoinScreen(vm: TripVM) {
     val ctx = LocalContext.current
     var text by remember { mutableStateOf("") }
     val invite = remember(text) { parseInvite(text) }
-    var who by remember(invite) { mutableStateOf<String?>(null) }
+    val keyOnly = if (invite == null) text.trim().uppercase().takeIf { Regex("[A-Z0-9]{3}-[A-Z0-9]{4}-[A-Z0-9]{4}").matches(it) } else null
+    LaunchedEffect(keyOnly) { vm.sync.start(); vm.sync.listenForKey(keyOnly) }
+    DisposableEffect(Unit) { onDispose { vm.sync.listenForKey(null) } }
+    val found = invite ?: vm.sync.joinFound
+    var who by remember(found?.id) { mutableStateOf<String?>(null) }
     Scaffold(containerColor = Bg) { p ->
         Column(Modifier.padding(p).padding(horizontal = 16.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Header("Join a trip", onBack = { vm.screen = Screen.Home })
-            if (invite == null) {
-                Text("Paste the invite message you received on WhatsApp.", color = Muted)
-                OutlinedTextField(text, { text = it }, label = { Text("Invite message") },
-                    modifier = Modifier.fillMaxWidth(), minLines = 4)
+            Header("Join with key", onBack = { vm.screen = Screen.Home })
+            if (found == null) {
+                Text("Enter the trip key, or paste the invite message from WhatsApp.", color = Muted)
+                OutlinedTextField(text, { text = it }, label = { Text("Trip key or invite message") },
+                    modifier = Modifier.fillMaxWidth(), minLines = 2)
                 OutlinedButton(modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
                     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString() ?: ""
                 }) { Text("Paste from clipboard") }
-                if (text.isNotBlank()) Text("No TripSplit invite found in this text.", color = Owe, fontSize = 13.sp)
+                if (keyOnly != null) WhiteCard {
+                    Text("Looking for people with this key…", fontWeight = FontWeight.Bold)
+                    Text("Keep this screen open and join the same Wi-Fi or hotspot as a trip member. The trip appears here by itself.",
+                        color = Muted, fontSize = 13.sp)
+                } else if (text.isNotBlank()) Text("That does not look like a trip key or invite.", color = Owe, fontSize = 13.sp)
             } else {
                 WhiteCard {
-                    Text(invite.name, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    Text("${fmtDate(invite.start)} – ${fmtDate(invite.end)}", color = Muted, fontSize = 13.sp)
-                    if (invite.destinations.isNotEmpty()) Text(invite.destinations.joinToString(", "), color = Muted, fontSize = 13.sp)
+                    Text(found.name, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text("${fmtDate(found.start)} – ${fmtDate(found.end)}", color = Muted, fontSize = 13.sp)
+                    if (found.expenses.isNotEmpty()) Text("${found.expenses.size} expenses will be received", color = Green, fontWeight = FontWeight.SemiBold)
                 }
                 Text("WHO ARE YOU?", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                invite.travelers.forEach { n ->
+                found.travelers.forEach { n ->
                     WhiteCard(Modifier.clickable { who = n }) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             RadioButton(selected = who == n, onClick = { who = n })
@@ -934,390 +1009,14 @@ fun JoinScreen(vm: TripVM) {
                         }
                     }
                 }
-                Text("Pick your own name.", color = Muted, fontSize = 13.sp)
                 Button(enabled = who != null, modifier = Modifier.fillMaxWidth().height(52.dp), onClick = {
-                    vm.joinTrip(invite, who!!)
-                    Toast.makeText(ctx, "Joined ${invite.name}", Toast.LENGTH_SHORT).show()
-                    vm.screen = Screen.Detail(invite.id)
-                }) { Text(if (who != null) "Join as $who" else "Join trip") }
-                OutlinedButton(modifier = Modifier.fillMaxWidth().height(52.dp),
-                    onClick = { text = "" }) { Text("Not now") }
+                    vm.joinTrip(found, who!!)
+                    Toast.makeText(ctx, "Joined ${found.name}. Expenses sync by themselves.", Toast.LENGTH_LONG).show()
+                    vm.screen = Screen.Detail(found.id)
+                }) { Text(if (who != null) "Join as $who and sync" else "Join trip") }
+                OutlinedButton(modifier = Modifier.fillMaxWidth().height(52.dp), onClick = { text = ""; vm.sync.listenForKey(null) }) { Text("Not now") }
             }
             Spacer(Modifier.height(16.dp))
         }
-    }
-}
-
-@Composable
-fun HubScreen(trip: Trip, vm: TripVM, startTab: Int) {
-    Scaffold(containerColor = Bg) { p ->
-        if (trip.key.isBlank()) {
-            Column(Modifier.padding(p).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Header("Trip chat", trip.name, onBack = { vm.screen = Screen.Detail(trip.id) })
-                Text("Open “Invite people” first to create the trip key.", color = Muted)
-            }
-        } else if (trip.me.isBlank()) {
-            Column(Modifier.padding(p).padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Header("Trip chat", trip.name, onBack = { vm.screen = Screen.Detail(trip.id) })
-                Text("Who are you on this phone?", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                trip.travelers.forEach { n ->
-                    WhiteCard(Modifier.clickable { vm.setMe(trip.id, n) }) { Text(n, fontWeight = FontWeight.SemiBold) }
-                }
-            }
-        } else {
-            HubBody(trip, vm, startTab, Modifier.padding(p))
-        }
-    }
-}
-
-private fun hm(ms: Long): String = SimpleDateFormat("h:mm a", Locale.ENGLISH).format(Date(ms))
-
-private fun openLocal(ctx: Context, path: String, mime: String) {
-    try {
-        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", File(path))
-        ctx.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime.ifBlank { "*/*" })
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
-    } catch (e: Exception) { Toast.makeText(ctx, "No app can open this file", Toast.LENGTH_SHORT).show() }
-}
-
-private fun decodeThumb(path: String): ImageBitmap? = try {
-    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(path, o)
-    var sample = 1
-    while (o.outWidth / sample > 1000) sample *= 2
-    BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
-} catch (e: Exception) { null }
-
-@Composable
-private fun HubBody(trip: Trip, vm: TripVM, startTab: Int, modifier: Modifier) {
-    val ctx = LocalContext.current
-    val view = LocalView.current
-    val owner = LocalLifecycleOwner.current
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { delay(1000); now = System.currentTimeMillis() } }
-    val window = remember(trip.start, trip.end) { tripWindow(trip.start, trip.end) }
-    val active = now in window
-    // read-only copy (not connected) so old messages stay readable outside the trip dates
-    val readOnly = remember(trip.id, trip.key, trip.me) {
-        TripNet(ctx.applicationContext, trip.id, trip.key, trip.me, devId(ctx.applicationContext), window)
-    }
-    val live = NetHolder.net?.takeIf { it.tripId == trip.id && it.me == trip.me }
-    val net: TripNet? = if (active) live else readOnly
-    LaunchedEffect(trip.id, trip.key, trip.me, active) {
-        val cur = NetHolder.net
-        if (active && (cur == null || cur.tripId != trip.id || cur.me != trip.me)) ListenService.start(ctx, trip)
-    }
-    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-    }
-    DisposableEffect(view) { view.keepScreenOn = true; onDispose { view.keepScreenOn = false } }
-    DisposableEffect(owner) {
-        val obs = LifecycleEventObserver { _, e ->
-            if (e == Lifecycle.Event.ON_RESUME) NetHolder.uiVisible = true
-            else if (e == Lifecycle.Event.ON_PAUSE) NetHolder.uiVisible = false
-        }
-        owner.lifecycle.addObserver(obs)
-        NetHolder.uiVisible = owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-        onDispose { owner.lifecycle.removeObserver(obs); NetHolder.uiVisible = false }
-    }
-    var tab by remember { mutableIntStateOf(if (active) startTab else 0) }
-    var panel by remember { mutableIntStateOf(0) }   // 0 chat or walkie, 1 members, 2 connection
-    LaunchedEffect(net?.note) {
-        net?.let { n -> n.note?.let { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show(); n.note = null } }
-    }
-    BackHandler(panel != 0) { panel = 0 }
-
-    Column(modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (net == null) {
-            Header(trip.name, "Connecting…", onBack = { vm.screen = Screen.Detail(trip.id) })
-            Text("Starting the Wi-Fi connection for this trip…", color = Muted)
-            return@Column
-        }
-        fun online(n: String) = active && (n == trip.me || (net.seen[n] ?: 0L) > now - 6000)
-        fun joinedN(n: String) = n == trip.me || net.joined.containsKey(n)
-        val onlineCount = trip.travelers.count { online(it) }
-        val joinedCount = trip.travelers.count { joinedN(it) }
-        Header(trip.name, if (active) "$joinedCount of ${trip.travelers.size} joined · $onlineCount online · " +
-            (if (net.linkUp) "Wi-Fi connected" else "No Wi-Fi link")
-            else "Chat is closed · old messages stay readable",
-            onBack = { if (panel != 0) panel = 0 else vm.screen = Screen.Detail(trip.id) }) {
-            Row {
-                if (active) TextButton(onClick = { panel = if (panel == 2) 0 else 2 }) { Text(if (panel == 2) "Chat" else "Status") }
-                TextButton(onClick = { panel = if (panel == 1) 0 else 1 }) { Text(if (panel == 1) "Chat" else "Members") }
-            }
-        }
-        if (!active) Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF4E5))) {
-            Column(Modifier.padding(12.dp)) {
-                Text("Trip chat is closed", fontWeight = FontWeight.Bold)
-                Text("The trip key works only from ${fmtDate(trip.start)} to ${fmtDate(trip.end)}. " +
-                    "New messages, files and walkie-talkie calls are blocked outside these dates. You can still read old messages.",
-                    color = Muted, fontSize = 13.sp)
-            }
-        }
-        if (panel == 1) {
-            MembersPanel(trip, net, ::online, ::joinedN, now)
-        } else if (panel == 2 && active) {
-            ConnectionPanel(trip, net, ::online, now, ctx)
-        } else {
-            if (active) TabRow(selectedTabIndex = tab, containerColor = Bg) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Chat") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Walkie-talkie") })
-            }
-            if (tab == 0 || !active) ChatPane(net, trip, ctx, active) else WalkiePane(net, trip, onlineCount, now)
-        }
-    }
-}
-
-@Composable
-private fun ColumnScope.ConnectionPanel(trip: Trip, net: TripNet, online: (String) -> Boolean, now: Long, ctx: Context) {
-    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        WhiteCard {
-            Text(if (net.linkUp) "Connected · Wi-Fi link found" else "No Wi-Fi link found",
-                fontSize = 18.sp, fontWeight = FontWeight.Bold, color = if (net.linkUp) Color(0xFF1B7A4B) else Owe)
-            Text(if (net.linkUp) "Messages and calls go straight between the phones on this Wi-Fi or hotspot."
-                 else "Connect to the same Wi-Fi, or switch on a hotspot on one phone and connect the others to it.",
-                color = Muted, fontSize = 13.sp)
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Card(Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("Wi-Fi", fontWeight = FontWeight.Bold)
-                    Text(if (net.linkUp) "Connected" else "Not connected", color = if (net.linkUp) Color(0xFF1B7A4B) else Owe, fontWeight = FontWeight.SemiBold)
-                    Text("${trip.travelers.count { online(it) && it != trip.me }} people nearby", color = Muted, fontSize = 13.sp)
-                }
-            }
-            Card(Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("Internet", fontWeight = FontWeight.Bold)
-                    Text(if (net.internetOk) "Available" else "Not available", color = if (net.internetOk) Color(0xFF1B7A4B) else Muted, fontWeight = FontWeight.SemiBold)
-                    Text("Not used yet. Internet mode is the next step.", color = Muted, fontSize = 13.sp)
-                }
-            }
-        }
-        Text("PEOPLE (${trip.travelers.size})", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        WhiteCard {
-            trip.travelers.forEach { n ->
-                val on = online(n)
-                val last = net.joined[n]
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text(n + if (n == trip.me) " (You)" else "", fontWeight = FontWeight.SemiBold)
-                        Text(if (on) "Online now" else if (last != null) "Last seen ${hm(last)}" else "Not seen yet", color = Muted, fontSize = 13.sp)
-                    }
-                    Text(if (n == trip.me) "This phone" else if (on) "Wi-Fi direct" else "Offline", fontWeight = FontWeight.Bold, fontSize = 12.sp,
-                        color = if (on) Color(0xFF0B4F44) else Muted)
-                }
-            }
-        }
-        Button(modifier = Modifier.fillMaxWidth().height(48.dp), onClick = {
-            net.refresh(); Toast.makeText(ctx, "Looking for people on this Wi-Fi…", Toast.LENGTH_SHORT).show()
-        }) { Text("Test connection") }
-        OutlinedButton(modifier = Modifier.fillMaxWidth().height(48.dp),
-            onClick = { ListenService.stop(ctx); Toast.makeText(ctx, "Stopped listening", Toast.LENGTH_SHORT).show() }) {
-            Text("Stop listening in background")
-        }
-        WhiteCard {
-            Text("If people do not show up", fontWeight = FontWeight.Bold)
-            Text("• Every phone must be on the same Wi-Fi or hotspot.", color = Muted, fontSize = 13.sp)
-            Text("• Hotel and public Wi-Fi often block phone-to-phone traffic. Use a phone hotspot instead.", color = Muted, fontSize = 13.sp)
-            Text("• Turn off battery saver for TripSplit and allow notifications.", color = Muted, fontSize = 13.sp)
-            Text("• Everyone needs the same trip key. Reset it and send a new invite if unsure.", color = Muted, fontSize = 13.sp)
-        }
-        Spacer(Modifier.height(8.dp))
-    }
-}
-
-@Composable
-private fun ColumnScope.MembersPanel(trip: Trip, net: TripNet, online: (String) -> Boolean, joined: (String) -> Boolean, now: Long) {
-    val ctx = LocalContext.current
-    val notJoined = trip.travelers.filter { !joined(it) }
-    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        WhiteCard {
-            Text("${trip.travelers.size - notJoined.size} joined", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Text("${trip.travelers.count { online(it) }} online now · ${notJoined.size} not joined yet", color = Muted, fontSize = 13.sp)
-        }
-        val dups = trip.travelers.filter { it in net.dupNames }
-        if (dups.isNotEmpty()) Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF4E5))) {
-            Column(Modifier.padding(14.dp)) {
-                Text("${dups.joinToString()} used on 2 phones", fontWeight = FontWeight.Bold)
-                Text("Two phones picked the same name. Ask them to check, or reset the trip key.", color = Muted, fontSize = 13.sp)
-            }
-        }
-        WhiteCard {
-            trip.travelers.forEach { n ->
-                val on = online(n)
-                val last = net.joined[n]
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text(n + if (n == trip.me) " (You)" else "", fontWeight = FontWeight.SemiBold)
-                        Text(if (on) "Online now" else if (joined(n) && last != null) "Joined · last seen ${hm(last)}"
-                             else if (joined(n)) "Joined" else "Not joined yet", color = Muted, fontSize = 13.sp)
-                    }
-                    if (!joined(n)) Text("Not joined yet", color = Color(0xFF7A4B00), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    else Box(Modifier.size(10.dp).clip(CircleShape).background(if (on) Color(0xFF1B9E5A) else Color(0xFFB7BFBA)))
-                }
-            }
-        }
-        if (notJoined.isNotEmpty()) OutlinedButton(modifier = Modifier.fillMaxWidth().height(52.dp),
-            onClick = { shareToWhatsApp(ctx, makeInviteText(trip)) }) { Text("Invite the ${notJoined.size} who have not joined") }
-        Spacer(Modifier.height(8.dp))
-    }
-}
-
-@Composable
-private fun ColumnScope.ChatPane(net: TripNet, trip: Trip, ctx: Context, canSend: Boolean = true) {
-    val listState = rememberLazyListState()
-    var text by remember { mutableStateOf("") }
-    var attach by remember { mutableStateOf(false) }
-    var camUri by remember { mutableStateOf<Uri?>(null) }
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { it?.let { u -> net.sendUri(u) } }
-    val doc = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let { u -> net.sendUri(u) } }
-    val cam = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok -> if (ok) camUri?.let { net.sendUri(it) } }
-    LaunchedEffect(net.messages.size) { if (net.messages.isNotEmpty()) listState.animateScrollToItem(net.messages.size - 1) }
-
-    if (attach) AlertDialog(onDismissRequest = { attach = false }, title = { Text("Send to the trip group") },
-        text = {
-            Column {
-                TextButton(onClick = {
-                    attach = false
-                    val f = File(File(ctx.cacheDir, "reports").apply { mkdirs() }, "cam_${System.currentTimeMillis()}.jpg")
-                    val u = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
-                    camUri = u; cam.launch(u)
-                }) { Text("Camera") }
-                TextButton(onClick = { attach = false; pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) { Text("Photos") }
-                TextButton(onClick = { attach = false; pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) }) { Text("Video") }
-                TextButton(onClick = { attach = false; doc.launch(arrayOf("*/*")) }) { Text("File") }
-                Text("Up to 100 MB per file · sent over Wi-Fi only · uses no mobile data", color = Muted, fontSize = 13.sp)
-            }
-        }, confirmButton = {}, dismissButton = { TextButton(onClick = { attach = false }) { Text("Cancel") } })
-
-    LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        item { Text("Messages go over Wi-Fi to everyone on this trip. You get them while this screen is open.",
-            color = Muted, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) }
-        items(net.messages, key = { it.id }) { m -> MsgBubble(m, m.from == trip.me, net, trip, ctx) }
-    }
-    if (canSend) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { attach = true }) { Text("＋ Attach") }
-        OutlinedTextField(text, { if (it.length <= 300) text = it }, placeholder = { Text("Type a message") },
-            modifier = Modifier.weight(1f), maxLines = 3)
-        Spacer(Modifier.width(6.dp))
-        Button(enabled = text.isNotBlank(), onClick = { net.sendText(text); text = "" }) { Text("Send") }
-    }
-    Spacer(Modifier.height(6.dp))
-}
-
-@Composable
-private fun MsgBubble(m: ChatMsg, mine: Boolean, net: TripNet, trip: Trip, ctx: Context) {
-    val path = net.localFiles[m.fid]?.takeIf { File(it).exists() }
-    val prog = net.progress[m.fid]
-    var menu by remember { mutableStateOf(false) }
-    var confirm by remember { mutableStateOf(false) }
-    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete for everyone?") },
-        text = { Text("This removes the message from every phone in the trip, also from people who are offline when they reconnect.") },
-        confirmButton = { TextButton(onClick = { net.deleteForEveryone(m); confirm = false }) { Text("Delete for everyone") } },
-        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
-        Surface(color = if (m.kind == "deleted") Color(0xFFEDEFEE) else if (mine) Color(0xFFD3EEDC) else Color.White,
-            shape = RoundedCornerShape(14.dp)) {
-            Column(Modifier.padding(10.dp).widthIn(max = 270.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (!mine && m.kind != "deleted") Text(m.from, color = Color(0xFF0B4F44), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                when (m.kind) {
-                    "deleted" -> Text("This message was deleted", color = Muted, fontStyle = FontStyle.Italic)
-                    "text" -> Text(m.text)
-                    "image", "video" -> {
-                        val bmp by produceState<ImageBitmap?>(null, path, m.kind) {
-                            value = if (path == null) null else withContext(Dispatchers.IO) {
-                                if (m.kind == "image") decodeThumb(path)
-                                else try { ThumbnailUtils.createVideoThumbnail(File(path), Size(480, 270), null).asImageBitmap() } catch (e: Exception) { null }
-                            }
-                        }
-                        Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFFDDE3DE))
-                            .clickable { if (path != null) openLocal(ctx, path, m.mime) else net.download(m) },
-                            contentAlignment = Alignment.Center) {
-                            bmp?.let { Image(it, m.fname, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-                            if (path != null && m.kind == "video") Text("▶", fontSize = 40.sp, color = Color.White)
-                            if (path == null && prog == null) {
-                                if (m.fid in net.failed) Text("Failed · tap to retry", color = Owe, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                else Text("Tap to download\n${fmtSize(m.size)}", color = Muted, fontSize = 13.sp)
-                            }
-                        }
-                    }
-                    else -> Row(Modifier.fillMaxWidth().clickable { if (path != null) openLocal(ctx, path, m.mime) else net.download(m) },
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("FILE", fontWeight = FontWeight.Bold, color = Owe, fontSize = 12.sp)
-                        Column(Modifier.weight(1f)) {
-                            Text(m.fname, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 2)
-                            Text(if (path != null) "${fmtSize(m.size)} · tap to open"
-                                 else if (m.fid in net.failed) "Failed · tap to retry"
-                                 else "${fmtSize(m.size)} · tap to download", color = if (m.fid in net.failed) Owe else Muted, fontSize = 12.sp)
-                        }
-                    }
-                }
-                if (prog != null) {
-                    LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth().height(6.dp))
-                    Text(if (mine) "Preparing…" else "Downloading ${(prog * 100).toInt()}%", color = Muted, fontSize = 12.sp)
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    val k = net.acks[m.id]?.size ?: 0
-                    val total = (trip.travelers.size - 1).coerceAtLeast(1)
-                    Text(if (mine && m.kind != "deleted") {
-                            if (k > 0) "✓✓ Delivered to ${minOf(k, total)} of $total"
-                            else if (!net.linkUp) "⏳ Waiting for connection" else "✓ Sent"
-                         } else "", color = Muted, fontSize = 11.sp)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(hm(m.ts), color = Muted, fontSize = 11.sp)
-                        Box {
-                            Text("  ⋮", color = Muted, fontSize = 16.sp, modifier = Modifier.clickable { menu = true })
-                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                DropdownMenuItem(text = { Text("Delete for me") }, onClick = { menu = false; net.deleteForMe(m.id) })
-                                if (net.canDeleteForEveryone(m)) DropdownMenuItem(text = { Text("Delete for everyone") },
-                                    onClick = { menu = false; confirm = true })
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun WalkiePane(net: TripNet, trip: Trip, onlineCount: Int, now: Long) {
-    val ctx = LocalContext.current
-    var micOk by remember { mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) }
-    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { micOk = it }
-    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        WhiteCard {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("${trip.name} · Wi-Fi", fontWeight = FontWeight.Bold)
-                    Text(net.error ?: "$onlineCount of ${trip.travelers.size} online · you are ${trip.me}", color = Muted, fontSize = 13.sp)
-                }
-                TextButton(onClick = { net.muted = !net.muted }) { Text(if (net.muted) "Unmute" else "Mute") }
-            }
-        }
-        if (!micOk) {
-            Text("The walkie-talkie needs the microphone.", color = Muted)
-            Button(modifier = Modifier.fillMaxWidth().height(52.dp),
-                onClick = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }) { Text("Allow microphone") }
-        } else {
-            val talker = net.talkingName
-            val secs = if (net.iAmTalking) ((now - net.talkStart) / 1000).coerceAtLeast(0) else 0
-            Text(if (net.iAmTalking) "You are talking…" else if (talker != null) "$talker is talking…" else "Nobody is talking",
-                fontSize = 20.sp, fontWeight = FontWeight.Bold, color = if (net.iAmTalking) Owe else Color.Unspecified)
-            Text(if (net.iAmTalking) "Mic is live · ${secs / 60}:${String.format("%02d", secs % 60)} · tap the button again to stop"
-                 else "Tap once to start talking. Tap again to stop.", color = Muted, fontSize = 13.sp)
-            Box(Modifier.size(190.dp).clip(CircleShape).background(if (net.iAmTalking) Owe else Green).clickable { net.toggleTalk() },
-                contentAlignment = Alignment.Center) {
-                Text(if (net.iAmTalking) "Tap to stop" else "Tap to start", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            }
-            Text("Everyone must be on the same Wi-Fi or phone hotspot, with TripSplit open. Only people who joined this trip can hear you.",
-                color = Muted, fontSize = 13.sp)
-        }
-        Spacer(Modifier.height(16.dp))
     }
 }

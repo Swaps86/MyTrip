@@ -11,7 +11,11 @@ data class Expense(
     val category: String, val amount: Double, val date: Long,
     val note: String, val paidBy: String, val splitAmong: List<String>,
     val location: String = "",
-    val ref: String = ""
+    val ref: String = "",
+    val addedBy: String = "",     // who typed this expense
+    val addedAt: Long = 0L,
+    val updatedAt: Long = 0L,     // used to decide which edit is newest when phones merge
+    val editedBy: String = ""
 )
 
 data class Trip(
@@ -19,7 +23,8 @@ data class Trip(
     val name: String, val start: Long, val end: Long,
     val destinations: List<String>, val travelers: List<String>,
     val budget: Double, val expenses: List<Expense> = emptyList(),
-    val key: String = "", val me: String = ""
+    val key: String = "", val me: String = "",
+    val deleted: Map<String, Long> = emptyMap()   // expenses deleted on any phone (so they stay deleted when merging)
 ) { val spent: Double get() = expenses.sumOf { it.amount } }
 
 data class Payment(val from: String, val to: String, val amount: Double)
@@ -57,17 +62,34 @@ fun settlements(b: Map<String, Double>): List<Payment> {
 fun JSONArray.strings() = List(length()) { getString(it) }
 
 fun Expense.toJson(): JSONObject = JSONObject().put("id", id).put("cat", category).put("amt", amount)
-    .put("date", date).put("note", note).put("paid", paidBy).put("split", JSONArray(splitAmong)).put("loc", location).put("ref", ref)
+    .put("date", date).put("note", note).put("paid", paidBy).put("split", JSONArray(splitAmong)).put("loc", location).put("ref", ref).put("by", addedBy).put("at", addedAt).put("up", updatedAt).put("eb", editedBy)
 
 fun expenseFrom(o: JSONObject) = Expense(o.getString("id"), o.getString("cat"), o.getDouble("amt"),
     o.getLong("date"), o.getString("note"), o.getString("paid"), o.getJSONArray("split").strings(),
-    o.optString("loc", ""), o.optString("ref", ""))
+    o.optString("loc", ""), o.optString("ref", ""),
+    o.optString("by", ""), o.optLong("at", 0L), o.optLong("up", 0L), o.optString("eb", ""))
 
 fun Trip.toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("start", start).put("end", end)
     .put("dest", JSONArray(destinations)).put("trav", JSONArray(travelers)).put("budget", budget)
-    .put("exp", JSONArray(expenses.map { it.toJson() })).put("key", key).put("me", me)
+    .put("exp", JSONArray(expenses.map { it.toJson() })).put("key", key).put("me", me).put("del", JSONObject(deleted as Map<*, *>))
 
 fun tripFrom(o: JSONObject) = Trip(o.getString("id"), o.getString("name"), o.getLong("start"), o.getLong("end"),
     o.getJSONArray("dest").strings(), o.getJSONArray("trav").strings(), o.getDouble("budget"),
     o.getJSONArray("exp").let { a -> List(a.length()) { expenseFrom(a.getJSONObject(it)) } },
-    key = o.optString("key", ""), me = o.optString("me", ""))
+    key = o.optString("key", ""), me = o.optString("me", ""),
+    deleted = o.optJSONObject("del")?.let { d -> d.keys().asSequence().associateWith { k -> d.getLong(k) } } ?: emptyMap())
+
+/** Merges two copies of the same trip. Nothing is lost; the newest edit of an expense wins. */
+fun mergeTrips(local: Trip, remote: Trip): Trip {
+    val dels = HashMap(local.deleted)
+    remote.deleted.forEach { (k, v) -> if (v > (dels[k] ?: 0L)) dels[k] = v }
+    val byId = LinkedHashMap<String, Expense>()
+    local.expenses.forEach { byId[it.id] = it }
+    for (r in remote.expenses) {
+        val l = byId[r.id]
+        if (l == null || r.updatedAt > l.updatedAt) byId[r.id] = r
+    }
+    val kept = byId.values.filter { e -> val d = dels[e.id]; d == null || d < e.updatedAt }
+        .sortedWith(compareByDescending<Expense> { it.date }.thenByDescending { it.addedAt })
+    return local.copy(expenses = kept, travelers = (local.travelers + remote.travelers).distinct(), deleted = dels)
+}

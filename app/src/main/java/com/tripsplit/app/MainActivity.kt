@@ -7,7 +7,11 @@ import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 class MainActivity : ComponentActivity() {
@@ -24,15 +28,26 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun App(vm: TripVM = viewModel()) {
+    // auto sync runs while the app is open
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner, vm.autoSync) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_START && vm.autoSync) vm.sync.start()
+            if (e == Lifecycle.Event.ON_STOP) vm.sync.stop()
+        }
+        owner.lifecycle.addObserver(obs)
+        if (!vm.autoSync) vm.sync.stop()
+        else if (owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) vm.sync.start()
+        onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+
     val s = vm.screen
     BackHandler(s != Screen.Home) {
         vm.screen = when (s) {
             is Screen.Form -> if (s.eid != null) Screen.ExpenseView(s.id, s.eid) else Screen.Detail(s.id)
             is Screen.ExpenseView -> Screen.Detail(s.id)
             is Screen.Toll -> Screen.Detail(s.id)
-            is Screen.Invite -> Screen.Detail(s.id)
-            is Screen.Walkie -> Screen.Detail(s.id)
-            is Screen.Chat -> Screen.Detail(s.id)
+            is Screen.Share -> Screen.Detail(s.id)
             else -> Screen.Home
         }
     }
@@ -41,9 +56,7 @@ fun App(vm: TripVM = viewModel()) {
         Screen.Create -> CreateScreen(vm)
         Screen.Backup -> BackupScreen(vm)
         Screen.Join -> JoinScreen(vm)
-        is Screen.Invite -> vm.trips.find { it.id == s.id }?.let { InviteScreen(it, vm) } ?: HomeScreen(vm)
-        is Screen.Walkie -> vm.trips.find { it.id == s.id }?.let { HubScreen(it, vm, 1) } ?: HomeScreen(vm)
-        is Screen.Chat -> vm.trips.find { it.id == s.id }?.let { HubScreen(it, vm, 0) } ?: HomeScreen(vm)
+        is Screen.Share -> vm.trips.find { it.id == s.id }?.let { ShareScreen(it, vm) } ?: HomeScreen(vm)
         is Screen.Detail -> vm.trips.find { it.id == s.id }?.let { DetailScreen(it, vm) } ?: HomeScreen(vm)
         is Screen.ExpenseView -> {
             val t = vm.trips.find { it.id == s.id }
